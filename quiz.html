@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <title>Quiz Drupal Backend</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 2em; }
+          #quiz-summary-container {
+            display: none;
+            flex-direction: row;
+            gap: 2em;
+            align-items: flex-start;
+          }
+          #guide-col { min-width: 240px; }
+          #quiz-col { flex: 1; }
+          .question { margin-bottom: 1em; }
+          .options label { display: block; margin-bottom: 0.5em; }
+          .navigation { margin-top: 1em; }
+          .timer { font-size: 1.2em; color: #b00; margin-bottom: 1em; }
+          .guide { display: grid; grid-template-columns: repeat(5, 2em); gap: 0.5em; margin-bottom: 1em; }
+          .guide-btn {
+            width: 2em; height: 2em; display: flex; align-items: center; justify-content: center;
+            border: 1px solid #888; border-radius: 4px; background: #f0f0f0; cursor: pointer;
+            font-weight: bold; font-size: 1em; color: #333;
+            transition: background 0.2s, color 0.2s;
+          }
+          .guide-btn.answered { background: #e0e0e0; }
+          .guide-btn.good { background: #c8f7c5; color: #1a7f1a; }
+          .guide-btn.bad { background: #f7c5c5; color: #b00; }
+          .guide-btn.active { border: 2px solid #0074d9; }
+          .good { color: green; }
+          .bad { color: red; }
+          .percent { font-size: 2em; font-weight: bold; }
+          code {
+            display: block;
+            padding: 10px;
+            background: #f0f0f0;
+            margin: 10px 0 20px 0;
+          }
+          form#options {
+            margin-bottom: 20px;
+            background: #fbfbfb;
+            padding: 20px;
+            border: 1px solid #ccc;
+          }
+
+          form#options > div {
+            padding: 10px 5px;
+          }
+
+          form#options > div:hover {
+            background: white;
+          }
+
+          form#options > div input {
+            margin-right: 20px;
+          }
+        </style>
+      </head>
+      <body>
+        <h1>Quiz Drupal Backend</h1>
+        <input type="file" id="csvFile" accept=".csv" />
+        <button id="startBtn" disabled>Lancer le quiz</button>
+        <div id="quiz-summary-container">
+          <div id="guide-col">
+            <div class="timer" id="timer"></div>
+            <div class="guide" id="guide"></div>
+          </div>
+          <div id="quiz-col">
+            <div class="question" id="questionText"></div>
+            <form id="options"></form>
+            <button type="button" class="explication-toggle">Voir l'explication</button>
+            <div id="questionExplain" class="explication-content" style="display:none;">
+            </div>
+            <div class="navigation">
+              <button id="prevBtn">Précédent</button>
+              <span id="progress"></span>
+              <button id="nextBtn">Suivant</button>
+              <button id="submitBtn" style="display:none;">Soumettre</button>
+            </div>
+          </div>
+        </div>
+        <div id="summary"></div>
+        <script>
+          let questions = [];
+          let selectedQuestions = [];
+          let userAnswers = [];
+          let current = 0;
+          let timerInterval, timeLeft = 90 * 60;
+          let checkedStatus = [];
+
+          document.getElementById('csvFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+              questions = removeDuplicates(parseCSV(evt.target.result));
+              document.getElementById('startBtn').disabled = questions.length < 60;
+            };
+            reader.readAsText(file);
+          });
+
+          document.getElementById('startBtn').onclick = function() {
+            selectedQuestions = shuffle(questions).slice(0, 60);
+            userAnswers = Array(60).fill(null);
+            checkedStatus = Array(60).fill(null);
+            current = 0;
+            document.getElementById('quiz-summary-container').style.display = 'flex';
+            document.getElementById('summary').style.display = 'none';
+            this.style.display = 'none';
+            document.getElementById('csvFile').style.display = 'none';
+            startTimer();
+            showQuestion();
+            updateGuide();
+          };
+
+          document.querySelectorAll('.explication-toggle').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+              const explication = btn.nextElementSibling;
+              explication.style.display = explication.style.display === 'none' ? 'block' : 'none';
+              btn.textContent = explication.style.display === 'block' ? 'Masquer l\'explication' : 'Voir l\'explication';
+            });
+          });
+
+          function parseCSV(data) {
+            const lines = data.split(/\r?\n/).filter(l => l.trim());
+            const result = [];
+            for (let i = 1; i < lines.length; i++) {
+              const [question, options, answer, category, difficulty, explain] = lines[i].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
+              if (!question || !options || !answer) continue;
+              result.push({
+                question: question.replace(/^"|"$/g, ''),
+                options: options.replace(/^"|"$/g, '').split('|').map(s => s.replace(/^\s*\d+\)\s*/, '').trim()),
+                answer: answer.replace(/"/g, '').split(',').map(a => a.trim()),
+                category: category ? category.trim() : '',
+                difficulty: difficulty ? difficulty.trim() : '',
+                explain: explain ? explain.replace(/^"|"$/g, '').trim() : ''
+              });
+            }
+            console.log(`Parsed ${result.length} questions`);
+            console.log(result);
+            return result;
+          }
+
+          // Fonction utilitaire pour échapper le HTML
+          function escapeHtml(text) {
+            return text
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/"/g, "&quot;")
+              .replace(/'/g, "&#039;");
+          }
+
+          // Fonction pour n’échapper que le contenu des balises <code>
+          function renderQuestionHtml(q) {
+            return q.question.replace(/<code>([\s\S]*?)<\/code>/g, function(_, codeContent) {
+              return `<code>${escapeHtml(codeContent)}</code>`;
+            });
+          }
+
+          function showQuestion() {
+            const q = selectedQuestions[current];
+            const cat = q.category ? q.category : '';
+            const diff = q.difficulty ? q.difficulty : '';
+            const exp = q.explain ? q.explain : '';
+            document.getElementById('questionText').innerHTML =
+              `<span class="dificulty ${diff}">${difficultyBar(diff)}</span>&nbsp;[${cat}] : ${renderQuestionHtml(q)}`;
+            document.getElementById('questionExplain').innerHTML =
+              `<code class="explain">${exp}</code>`;
+            const optionsDiv = document.getElementById('options');
+            optionsDiv.innerHTML = '';
+            const type = isMultiple(q) ? 'checkbox' : 'radio';
+            q.options.forEach((opt, idx) => {
+              const checked = userAnswers[current] && userAnswers[current].includes((idx + 1) + '');
+              optionsDiv.innerHTML += `<div><label><input type="${type}" name="option${current}" value="${idx+1}" ${checked ? 'checked' : ''}> ${opt}</label></div>`;
+            });
+            document.getElementById('progress').textContent = `Question ${current + 1} / 60`;
+            document.getElementById('prevBtn').disabled = current === 0;
+            document.getElementById('nextBtn').style.display = current < 59 ? '' : 'none';
+            document.getElementById('submitBtn').style.display = current === 59 ? '' : 'none';
+            updateGuide();
+          }
+
+          function removeDuplicates(arr) {
+            const seen = new Set();
+            return arr.filter(q => {
+              if (seen.has(q.question)) return false;
+              seen.add(q.question);
+              return true;
+            });
+          }
+
+          function difficultyBar(diff) {
+            if (diff === 'Facile') return '░░░░';
+            if (diff === 'Moyen') return '▓▓░░';
+            if (diff === 'Difficile') return '▓▓▓▓';
+            return '';
+          }
+
+          function shuffle(arr) {
+            return arr.map(a => [Math.random(), a]).sort().map(a => a[1]);
+          }
+
+          function isMultiple(q) {
+            return q.answer.length > 1;
+          }
+
+          document.getElementById('prevBtn').onclick = function() {
+            saveAnswer();
+            if (current > 0) current--;
+            showQuestion();
+          };
+
+          document.getElementById('nextBtn').onclick = function() {
+            saveAnswer();
+            if (current < 59) current++;
+            showQuestion();
+          };
+
+          document.getElementById('submitBtn').onclick = function() {
+            saveAnswer();
+            clearInterval(timerInterval);
+            showSummary();
+          };
+
+          function saveAnswer() {
+            const q = selectedQuestions[current];
+            let checked;
+            if (isMultiple(q)) {
+              checked = Array.from(document.querySelectorAll(`input[name="option${current}"]:checked`)).map(cb => cb.value);
+            } else {
+              const radio = document.querySelector(`input[name="option${current}"]:checked`);
+              checked = radio ? [radio.value] : [];
+            }
+            userAnswers[current] = checked;
+            checkedStatus[current] = arraysEqual(q.answer, checked) ? 'good' : (checked.length ? 'bad' : null);
+            updateGuide();
+          }
+
+          function startTimer() {
+            timeLeft = 90 * 60;
+            updateTimer();
+            timerInterval = setInterval(() => {
+              timeLeft--;
+              updateTimer();
+              if (timeLeft <= 0) {
+                clearInterval(timerInterval);
+                showSummary();
+              }
+            }, 1000);
+          }
+
+          function updateTimer() {
+            const min = Math.floor(timeLeft / 60);
+            const sec = timeLeft % 60;
+            document.getElementById('timer').textContent = `Temps restant : ${min}m ${sec < 10 ? '0' : ''}${sec}s`;
+          }
+
+          function showSummary() {
+            document.getElementById('quiz-summary-container').style.display = 'none';
+            let correct = 0;
+            let html = '<h2>Résumé</h2>';
+            selectedQuestions.forEach((q, i) => {
+              const good = arraysEqual(q.answer, userAnswers[i]);
+              if (good) correct++;
+              html += `<div><b>Q${i+1}:</b> ${q.question}<br>`;
+              html += `Votre réponse : <span class="${good ? 'good' : 'bad'}">${formatAnswers(q.options, userAnswers[i])}</span><br>`;
+              if (!good) {
+                html += `Bonne réponse : <span class="good">${formatAnswers(q.options, q.answer)}</span><br>`;
+              }
+              html += '</div><hr>';
+            });
+            const percent = Math.round((correct / 60) * 100);
+            html = `<div class="percent">${percent}% de bonnes réponses</div>` + html;
+            document.getElementById('summary').innerHTML = html;
+            document.getElementById('summary').style.display = '';
+            updateGuide(true);
+          }
+
+          function formatAnswers(options, arr) {
+            if (!arr || arr.length === 0) return '<i>Aucune</i>';
+            return arr.map(idx => options[parseInt(idx)-1]).join(', ');
+          }
+
+          function arraysEqual(a, b) {
+            if (!a || !b) return false;
+            a = a.map(x => x + '').sort();
+            b = b.map(x => x + '').sort();
+            return a.length === b.length && a.every((v, i) => v === b[i]);
+          }
+
+          function updateGuide(final = false) {
+            const guide = document.getElementById('guide');
+            guide.innerHTML = '';
+            for (let i = 0; i < 60; i++) {
+              let cls = 'guide-btn';
+              if (userAnswers[i] && userAnswers[i].length) {
+                if (checkedStatus[i] === 'good') cls += ' good';
+                else if (checkedStatus[i] === 'bad') cls += ' bad';
+                else cls += ' answered';
+              }
+              if (i === current && !final) cls += ' active';
+              guide.innerHTML += `<div class="${cls}" data-idx="${i}">${i+1}</div>`;
+            }
+            Array.from(guide.children).forEach(btn => {
+              btn.onclick = function() {
+                saveAnswer();
+                current = parseInt(this.getAttribute('data-idx'));
+                showQuestion();
+              };
+            });
+          }
+        </script>
+      </body>
+      </html>
